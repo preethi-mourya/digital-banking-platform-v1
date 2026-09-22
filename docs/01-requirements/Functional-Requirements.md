@@ -132,24 +132,31 @@ The platform must:
 ## 8. Non-Functional Requirements
 
 ### Security
+
 Customer, authentication, and financial data must be protected from unauthorized access.
 
 ### Performance
+
 APIs and database operations should provide efficient response times under expected V1 usage.
 
 ### Reliability
+
 The system should handle supported failures without corrupting financial data.
 
 ### Maintainability
+
 The application should follow clean coding practices, separation of concerns, and layered architecture.
 
 ### Testability
+
 Business logic, APIs, security, database operations, and critical financial workflows should be automated-testable.
 
 ### Auditability
+
 Important business, security, and administrative operations must be traceable.
 
 ### Data Integrity
+
 Financial and customer data must remain consistent through database constraints and transaction management.
 
 ---
