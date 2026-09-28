@@ -1,6 +1,7 @@
 package com.preethi.banking.service;
 
 import com.preethi.banking.entity.Customer;
+import com.preethi.banking.exception.ResourceNotFoundException;
 import com.preethi.banking.repository.CustomerRepository;
 import org.springframework.stereotype.Service;
 
@@ -24,7 +25,12 @@ public class CustomerService {
     }
 
     public Customer getCustomerById(Long id) {
+
         return customerRepository.findById(id)
-                .orElseThrow(() -> new RuntimeException("Customer not found"));
+                .orElseThrow(() ->
+                        new ResourceNotFoundException(
+                                "Customer not found with id: " + id
+                        )
+                );
     }
 }
