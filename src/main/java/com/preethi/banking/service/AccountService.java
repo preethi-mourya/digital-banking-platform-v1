@@ -1,19 +1,25 @@
-package com.preethi.banking.service;
+ package com.preethi.banking.service;
 
 import com.preethi.banking.dto.TransferRequest;
 import com.preethi.banking.dto.TransferResponse;
 import com.preethi.banking.entity.Account;
 import com.preethi.banking.entity.AccountStatus;
+import com.preethi.banking.entity.AuditAction;
 import com.preethi.banking.entity.BankTransaction;
 import com.preethi.banking.entity.Beneficiary;
 import com.preethi.banking.entity.BeneficiaryStatus;
+import com.preethi.banking.entity.NotificationType;
 import com.preethi.banking.entity.TransactionStatus;
 import com.preethi.banking.entity.TransactionType;
+import com.preethi.banking.entity.User;
 import com.preethi.banking.exception.ResourceNotFoundException;
 import com.preethi.banking.repository.AccountRepository;
 import com.preethi.banking.repository.BankTransactionRepository;
 import com.preethi.banking.repository.BeneficiaryRepository;
 import com.preethi.banking.repository.CustomerRepository;
+import com.preethi.banking.repository.UserRepository;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -30,29 +36,60 @@ public class AccountService {
     private final CustomerRepository customerRepository;
     private final BeneficiaryRepository beneficiaryRepository;
     private final BankTransactionRepository bankTransactionRepository;
+    private final UserRepository userRepository;
+    private final NotificationService notificationService;
+    private final AuditLogService auditLogService;
 
     public AccountService(
             AccountRepository accountRepository,
             CustomerRepository customerRepository,
             BeneficiaryRepository beneficiaryRepository,
-            BankTransactionRepository bankTransactionRepository) {
+            BankTransactionRepository bankTransactionRepository,
+            UserRepository userRepository,
+            NotificationService notificationService,
+            AuditLogService auditLogService) {
 
         this.accountRepository = accountRepository;
         this.customerRepository = customerRepository;
         this.beneficiaryRepository = beneficiaryRepository;
         this.bankTransactionRepository = bankTransactionRepository;
+        this.userRepository = userRepository;
+        this.notificationService = notificationService;
+        this.auditLogService = auditLogService;
     }
 
-    // =========================================================
-    // CREATE ACCOUNT
-    // =========================================================
+    // GET CUSTOMER ID FROM LOGGED-IN USER
 
+    @Transactional(readOnly = true)
+    public Long getCustomerIdForUsername(String username) {
+
+        User user = userRepository.findByUsername(username)
+                .orElseThrow(() ->
+                        new ResourceNotFoundException(
+                                "User not found: " + username));
+
+        if (user.getCustomer() == null) {
+            throw new IllegalStateException(
+                    "Logged-in user is not linked to a customer");
+        }
+
+        return user.getCustomer().getId();
+    }
+
+    // CREATE ACCOUNT
+
+    @Transactional
     public Account createAccount(Long customerId, Account account) {
 
         var customer = customerRepository.findById(customerId)
                 .orElseThrow(() ->
                         new ResourceNotFoundException(
                                 "Customer not found with id: " + customerId));
+
+        if (account.getAccountType() == null) {
+            throw new IllegalArgumentException(
+                    "Account type is required");
+        }
 
         if (account.getBalance() == null) {
             account.setBalance(BigDecimal.ZERO);
@@ -67,13 +104,21 @@ public class AccountService {
         account.setStatus(AccountStatus.ACTIVE);
         account.setCustomer(customer);
 
-        return accountRepository.save(account);
+        Account savedAccount = accountRepository.save(account);
+
+        auditLogService.record(
+                currentUsername(),
+                AuditAction.ACCOUNT_CREATED,
+                "Account",
+                String.valueOf(savedAccount.getId()),
+                "Account created for customer ID " + customerId);
+
+        return savedAccount;
     }
 
-    // =========================================================
     // GET ACCOUNT BY ID
-    // =========================================================
 
+    @Transactional(readOnly = true)
     public Account getAccountById(Long id) {
 
         return accountRepository.findById(id)
@@ -82,10 +127,20 @@ public class AccountService {
                                 "Account not found with id: " + id));
     }
 
-    // =========================================================
-    // GET ACCOUNT BY ACCOUNT NUMBER
-    // =========================================================
+    // GET ACCOUNT BY ID WITH CUSTOMER OWNERSHIP CHECK
 
+    @Transactional(readOnly = true)
+    public Account getAccountByIdForCustomer(
+            Long id, Long customerId) {
+
+        Account account = getAccountById(id);
+        ensureOwnership(account, customerId);
+        return account;
+    }
+
+    // GET ACCOUNT BY ACCOUNT NUMBER
+
+    @Transactional(readOnly = true)
     public Account getAccountByNumber(String accountNumber) {
 
         return accountRepository.findByAccountNumber(accountNumber)
@@ -95,10 +150,20 @@ public class AccountService {
                                         + accountNumber));
     }
 
-    // =========================================================
-    // GET ALL ACCOUNTS OF CUSTOMER
-    // =========================================================
+    // GET ACCOUNT BY NUMBER WITH CUSTOMER OWNERSHIP CHECK
 
+    @Transactional(readOnly = true)
+    public Account getAccountByNumberForCustomer(
+            String accountNumber, Long customerId) {
+
+        Account account = getAccountByNumber(accountNumber);
+        ensureOwnership(account, customerId);
+        return account;
+    }
+
+    // GET ALL ACCOUNTS OF CUSTOMER
+
+    @Transactional(readOnly = true)
     public List<Account> getAccountsByCustomer(Long customerId) {
 
         if (!customerRepository.existsById(customerId)) {
@@ -109,71 +174,122 @@ public class AccountService {
         return accountRepository.findByCustomerId(customerId);
     }
 
-    // =========================================================
     // BLOCK ACCOUNT
-    // =========================================================
 
+    @Transactional
     public Account blockAccount(Long id) {
 
         Account account = getAccountById(id);
-
-        account.setStatus(AccountStatus.BLOCKED);
-
-        return accountRepository.save(account);
+        return blockAccountInternal(account);
     }
 
-    // =========================================================
-    // CLOSE ACCOUNT
-    // =========================================================
+    @Transactional
+    public Account blockAccount(Long id, Long customerId) {
 
+        Account account = getAccountById(id);
+        ensureOwnership(account, customerId);
+        return blockAccountInternal(account);
+    }
+
+    private Account blockAccountInternal(Account account) {
+
+        if (account.getStatus() == AccountStatus.CLOSED) {
+            throw new IllegalStateException(
+                    "A closed account cannot be blocked");
+        }
+
+        if (account.getStatus() == AccountStatus.BLOCKED) {
+            return account;
+        }
+
+        account.setStatus(AccountStatus.BLOCKED);
+        Account savedAccount = accountRepository.save(account);
+
+        auditLogService.record(
+                currentUsername(),
+                AuditAction.ACCOUNT_BLOCKED,
+                "Account",
+                String.valueOf(savedAccount.getId()),
+                "Account blocked");
+
+        return savedAccount;
+    }
+
+    // CLOSE ACCOUNT
+
+    @Transactional
     public Account closeAccount(Long id) {
 
         Account account = getAccountById(id);
+        return closeAccountInternal(account);
+    }
+
+    @Transactional
+    public Account closeAccount(Long id, Long customerId) {
+
+        Account account = getAccountById(id);
+        ensureOwnership(account, customerId);
+        return closeAccountInternal(account);
+    }
+
+    private Account closeAccountInternal(Account account) {
 
         if (account.getBalance().compareTo(BigDecimal.ZERO) != 0) {
             throw new IllegalStateException(
                     "Account cannot be closed while balance is not zero");
         }
 
-        account.setStatus(AccountStatus.CLOSED);
+        if (account.getStatus() == AccountStatus.CLOSED) {
+            return account;
+        }
 
-        return accountRepository.save(account);
+        account.setStatus(AccountStatus.CLOSED);
+        Account savedAccount = accountRepository.save(account);
+
+        auditLogService.record(
+                currentUsername(),
+                AuditAction.ACCOUNT_CLOSED,
+                "Account",
+                String.valueOf(savedAccount.getId()),
+                "Account closed");
+
+        return savedAccount;
     }
 
-    // =========================================================
     // FUND TRANSFER
-    // =========================================================
 
     @Transactional
     public TransferResponse transferMoney(
             Long customerId,
             TransferRequest request) {
 
-        // 1. Find source account
-        Account sourceAccount =
-                accountRepository.findByAccountNumber(
-                                request.getSourceAccountNumber())
-                        .orElseThrow(() ->
-                                new ResourceNotFoundException(
-                                        "Source account not found"));
-
-        // 2. Verify source account belongs to customer
-        if (!sourceAccount.getCustomer().getId()
-                .equals(customerId)) {
-
+        if (request == null) {
             throw new IllegalArgumentException(
-                    "Source account does not belong to customer");
+                    "Transfer request is required");
         }
 
-        // 3. Source account must be active
-        if (sourceAccount.getStatus()
-                != AccountStatus.ACTIVE) {
+        String sourceAccountNumber =
+                request.getSourceAccountNumber();
 
-            throw new IllegalStateException(
-                    "Source account is not active");
+        if (sourceAccountNumber == null
+                || sourceAccountNumber.isBlank()) {
+            throw new IllegalArgumentException(
+                    "Source account number is required");
         }
 
-        // 4. Find beneficiary
+        if (request.getBeneficiaryId() == null) {
+            throw new IllegalArgumentException(
+                    "Beneficiary ID is required");
+        }
+
+        BigDecimal amount = request.getAmount();
+
+        if (amount == null
+                || amount.compareTo(BigDecimal.ZERO) <= 0) {
+            throw new IllegalArgumentException(
+                    "Transfer amount must be greater than zero");
+        }
+
         Beneficiary beneficiary =
                 beneficiaryRepository.findById(
                                 request.getBeneficiaryId())
@@ -181,67 +297,81 @@ public class AccountService {
                                 new ResourceNotFoundException(
                                         "Beneficiary not found"));
 
-        // 5. Verify beneficiary belongs to customer
-        if (!beneficiary.getCustomer().getId()
+        if (beneficiary.getCustomer() == null
+                || !beneficiary.getCustomer().getId()
                 .equals(customerId)) {
-
             throw new IllegalArgumentException(
                     "Beneficiary does not belong to customer");
         }
 
-        // 6. Beneficiary must be active
-        if (beneficiary.getStatus()
-                != BeneficiaryStatus.ACTIVE) {
-
+        if (beneficiary.getStatus() != BeneficiaryStatus.ACTIVE) {
             throw new IllegalStateException(
                     "Beneficiary is not active");
         }
 
-        // 7. Find destination account
-        Account destinationAccount =
-                accountRepository.findByAccountNumber(
-                                beneficiary.getAccountNumber())
-                        .orElseThrow(() ->
-                                new ResourceNotFoundException(
-                                        "Destination account not found"));
+        String destinationAccountNumber =
+                beneficiary.getAccountNumber();
 
-        // 8. Source and destination cannot be same
-        if (sourceAccount.getAccountNumber()
-                .equals(destinationAccount.getAccountNumber())) {
+        if (destinationAccountNumber == null
+                || destinationAccountNumber.isBlank()) {
+            throw new IllegalStateException(
+                    "Beneficiary destination account number is missing");
+        }
 
+        if (sourceAccountNumber.equals(destinationAccountNumber)) {
             throw new IllegalArgumentException(
                     "Source and destination accounts cannot be the same");
         }
 
-        // 9. Validate amount
-        BigDecimal amount = request.getAmount();
+        // Lock both account rows before reading balances or updating them.
+        List<Account> lockedAccounts =
+                accountRepository.findAccountsForUpdate(
+                        List.of(
+                                sourceAccountNumber,
+                                destinationAccountNumber));
 
-        if (amount == null ||
-                amount.compareTo(BigDecimal.ZERO) <= 0) {
+        Account sourceAccount = lockedAccounts.stream()
+                .filter(account -> sourceAccountNumber.equals(
+                        account.getAccountNumber()))
+                .findFirst()
+                .orElseThrow(() ->
+                        new ResourceNotFoundException(
+                                "Source account not found"));
 
-            throw new IllegalArgumentException(
-                    "Transfer amount must be greater than zero");
+        Account destinationAccount = lockedAccounts.stream()
+                .filter(account -> destinationAccountNumber.equals(
+                        account.getAccountNumber()))
+                .findFirst()
+                .orElseThrow(() ->
+                        new ResourceNotFoundException(
+                                "Destination account not found"));
+
+        ensureOwnership(sourceAccount, customerId);
+
+        if (sourceAccount.getStatus() != AccountStatus.ACTIVE) {
+            throw new IllegalStateException(
+                    "Source account is not active");
         }
 
-        // 10. Check balance
-        if (sourceAccount.getBalance()
-                .compareTo(amount) < 0) {
+        if (destinationAccount.getStatus() != AccountStatus.ACTIVE) {
+            throw new IllegalStateException(
+                    "Destination account is not active");
+        }
 
+        if (sourceAccount.getBalance().compareTo(amount) < 0) {
             throw new IllegalStateException(
                     "Insufficient account balance");
         }
 
-        // 11. Debit source account
         sourceAccount.setBalance(
-                sourceAccount.getBalance()
-                        .subtract(amount));
+                sourceAccount.getBalance().subtract(amount));
 
-        // 12. Credit destination account
         destinationAccount.setBalance(
-                destinationAccount.getBalance()
-                        .add(amount));
+                destinationAccount.getBalance().add(amount));
 
-        // 13. Generate transaction reference
+        accountRepository.save(sourceAccount);
+        accountRepository.save(destinationAccount);
+
         String reference =
                 "TXN-" +
                         UUID.randomUUID()
@@ -250,33 +380,44 @@ public class AccountService {
                                 .substring(0, 16)
                                 .toUpperCase();
 
-        // 14. Create transaction record
-        BankTransaction transaction =
-                new BankTransaction();
+        BankTransaction transaction = new BankTransaction();
 
         transaction.setTransactionReference(reference);
-
         transaction.setSourceAccountNumber(
                 sourceAccount.getAccountNumber());
-
         transaction.setDestinationAccountNumber(
                 destinationAccount.getAccountNumber());
-
         transaction.setAmount(amount);
+        transaction.setType(TransactionType.TRANSFER);
+        transaction.setStatus(TransactionStatus.SUCCESS);
+        transaction.setCreatedAt(LocalDateTime.now());
 
-        transaction.setType(
-                TransactionType.TRANSFER);
-
-        transaction.setStatus(
-                TransactionStatus.SUCCESS);
-
-        transaction.setCreatedAt(
-                LocalDateTime.now());
-
-        // 15. Save transaction
         bankTransactionRepository.save(transaction);
 
-        // 16. Return response
+        createTransferNotification(
+                sourceAccount,
+                "Fund transfer successful",
+                "Your transfer of " + amount.toPlainString()
+                        + " to account "
+                        + destinationAccount.getAccountNumber()
+                        + " was successful. Reference: " + reference);
+
+        createTransferNotification(
+                destinationAccount,
+                "Funds received",
+                "You have received " + amount.toPlainString()
+                        + " from account "
+                        + sourceAccount.getAccountNumber()
+                        + ". Reference: " + reference);
+
+        auditLogService.record(
+                currentUsername(),
+                AuditAction.FUND_TRANSFER,
+                "BankTransaction",
+                reference,
+                "Transfer completed for amount "
+                        + amount.toPlainString());
+
         return new TransferResponse(
                 reference,
                 sourceAccount.getAccountNumber(),
@@ -286,10 +427,27 @@ public class AccountService {
                 "Fund transfer completed successfully");
     }
 
-    // =========================================================
-    // TRANSACTION HISTORY
-    // =========================================================
+    // CREATE TRANSFER NOTIFICATION
 
+    private void createTransferNotification(
+            Account account,
+            String title,
+            String message) {
+
+        Long customerId = account.getCustomer().getId();
+
+        userRepository.findByCustomer_Id(customerId)
+                .ifPresent(user ->
+                        notificationService.createNotification(
+                                user.getId(),
+                                title,
+                                message,
+                                NotificationType.TRANSFER));
+    }
+
+    // TRANSACTION HISTORY
+
+    @Transactional(readOnly = true)
     public List<BankTransaction> getTransactionHistory(
             String accountNumber) {
 
@@ -303,18 +461,56 @@ public class AccountService {
                         .findByDestinationAccountNumberOrderByCreatedAtDesc(
                                 accountNumber);
 
-        List<BankTransaction> transactions =
-                new ArrayList<>();
-
+        List<BankTransaction> transactions = new ArrayList<>();
         transactions.addAll(outgoing);
         transactions.addAll(incoming);
+
+        transactions.sort((first, second) ->
+                second.getCreatedAt().compareTo(first.getCreatedAt()));
 
         return transactions;
     }
 
-    // =========================================================
+    // TRANSACTION HISTORY WITH CUSTOMER OWNERSHIP CHECK
+
+    @Transactional(readOnly = true)
+    public List<BankTransaction> getTransactionHistoryForCustomer(
+            String accountNumber, Long customerId) {
+
+        Account account = getAccountByNumber(accountNumber);
+        ensureOwnership(account, customerId);
+
+        return getTransactionHistory(accountNumber);
+    }
+
+    // VERIFY ACCOUNT OWNERSHIP
+
+    private void ensureOwnership(Account account, Long customerId) {
+
+        if (account.getCustomer() == null
+                || !account.getCustomer().getId().equals(customerId)) {
+            throw new IllegalArgumentException(
+                    "Account does not belong to customer");
+        }
+    }
+
+    // GET CURRENT USERNAME FOR AUDIT
+
+    private String currentUsername() {
+
+        Authentication authentication =
+                SecurityContextHolder.getContext().getAuthentication();
+
+        if (authentication == null
+                || !authentication.isAuthenticated()
+                || authentication.getName() == null) {
+            return "SYSTEM";
+        }
+
+        return authentication.getName();
+    }
+
     // GENERATE ACCOUNT NUMBER
-    // =========================================================
 
     private String generateAccountNumber() {
 
@@ -329,8 +525,7 @@ public class AccountService {
                                     .substring(0, 12)
                                     .toUpperCase();
 
-        } while (accountRepository
-                .existsByAccountNumber(accountNumber));
+        } while (accountRepository.existsByAccountNumber(accountNumber));
 
         return accountNumber;
     }

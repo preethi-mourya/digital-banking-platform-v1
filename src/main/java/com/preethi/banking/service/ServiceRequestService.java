@@ -1,11 +1,15 @@
+
 package com.preethi.banking.service;
 
+import com.preethi.banking.entity.AuditAction;
 import com.preethi.banking.entity.Customer;
 import com.preethi.banking.entity.ServiceRequest;
 import com.preethi.banking.entity.ServiceRequestStatus;
 import com.preethi.banking.exception.ResourceNotFoundException;
 import com.preethi.banking.repository.CustomerRepository;
 import com.preethi.banking.repository.ServiceRequestRepository;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -18,13 +22,16 @@ public class ServiceRequestService {
 
     private final ServiceRequestRepository serviceRequestRepository;
     private final CustomerRepository customerRepository;
+    private final AuditLogService auditLogService;
 
     public ServiceRequestService(
             ServiceRequestRepository serviceRequestRepository,
-            CustomerRepository customerRepository) {
+            CustomerRepository customerRepository,
+            AuditLogService auditLogService) {
 
         this.serviceRequestRepository = serviceRequestRepository;
         this.customerRepository = customerRepository;
+        this.auditLogService = auditLogService;
     }
 
     @Transactional
@@ -38,20 +45,29 @@ public class ServiceRequestService {
                                 "Customer not found with id: " + customerId));
 
         serviceRequest.setRequestReference(generateRequestReference());
-
         serviceRequest.setStatus(ServiceRequestStatus.PENDING);
 
         LocalDateTime now = LocalDateTime.now();
         serviceRequest.setCreatedAt(now);
         serviceRequest.setUpdatedAt(now);
-
         serviceRequest.setCustomer(customer);
 
-        return serviceRequestRepository.save(serviceRequest);
+        ServiceRequest savedRequest =
+                serviceRequestRepository.save(serviceRequest);
+
+        auditLogService.record(
+                currentUsername(),
+                AuditAction.SERVICE_REQUEST_CREATED,
+                "SERVICE_REQUEST",
+                String.valueOf(savedRequest.getId()),
+                "Service request created"
+        );
+
+        return savedRequest;
     }
 
-    public List<ServiceRequest> getCustomerRequests(
-            Long customerId) {
+    @Transactional(readOnly = true)
+    public List<ServiceRequest> getCustomerRequests(Long customerId) {
 
         if (!customerRepository.existsById(customerId)) {
             throw new ResourceNotFoundException(
@@ -62,6 +78,7 @@ public class ServiceRequestService {
                 .findByCustomerIdOrderByCreatedAtDesc(customerId);
     }
 
+    @Transactional(readOnly = true)
     public ServiceRequest getCustomerRequest(
             Long customerId,
             Long requestId) {
@@ -89,9 +106,21 @@ public class ServiceRequestService {
         request.setStatus(ServiceRequestStatus.CANCELLED);
         request.setUpdatedAt(LocalDateTime.now());
 
-        return serviceRequestRepository.save(request);
+        ServiceRequest savedRequest =
+                serviceRequestRepository.save(request);
+
+        auditLogService.record(
+                currentUsername(),
+                AuditAction.SERVICE_REQUEST_CANCELLED,
+                "SERVICE_REQUEST",
+                String.valueOf(savedRequest.getId()),
+                "Service request cancelled"
+        );
+
+        return savedRequest;
     }
 
+    @Transactional(readOnly = true)
     public List<ServiceRequest> getRequestsByStatus(
             ServiceRequestStatus status) {
 
@@ -109,9 +138,7 @@ public class ServiceRequestService {
                                         "Service request not found with id: "
                                                 + requestId));
 
-        if (request.getStatus()
-                != ServiceRequestStatus.PENDING) {
-
+        if (request.getStatus() != ServiceRequestStatus.PENDING) {
             throw new IllegalStateException(
                     "Only pending requests can be moved to in-progress");
         }
@@ -119,7 +146,18 @@ public class ServiceRequestService {
         request.setStatus(ServiceRequestStatus.IN_PROGRESS);
         request.setUpdatedAt(LocalDateTime.now());
 
-        return serviceRequestRepository.save(request);
+        ServiceRequest savedRequest =
+                serviceRequestRepository.save(request);
+
+        auditLogService.record(
+                currentUsername(),
+                AuditAction.SERVICE_REQUEST_STARTED,
+                "SERVICE_REQUEST",
+                String.valueOf(savedRequest.getId()),
+                "Service request processing started"
+        );
+
+        return savedRequest;
     }
 
     @Transactional
@@ -142,16 +180,39 @@ public class ServiceRequestService {
         request.setStatus(ServiceRequestStatus.COMPLETED);
         request.setUpdatedAt(LocalDateTime.now());
 
-        return serviceRequestRepository.save(request);
+        ServiceRequest savedRequest =
+                serviceRequestRepository.save(request);
+
+        auditLogService.record(
+                currentUsername(),
+                AuditAction.SERVICE_REQUEST_COMPLETED,
+                "SERVICE_REQUEST",
+                String.valueOf(savedRequest.getId()),
+                "Service request completed"
+        );
+
+        return savedRequest;
+    }
+
+    private String currentUsername() {
+        Authentication authentication =
+                SecurityContextHolder.getContext().getAuthentication();
+
+        if (authentication == null
+                || !authentication.isAuthenticated()
+                || "anonymousUser".equals(authentication.getName())) {
+            throw new IllegalStateException(
+                    "Authenticated user is required for audit logging");
+        }
+
+        return authentication.getName();
     }
 
     private String generateRequestReference() {
-
-        return "SR-" +
-                UUID.randomUUID()
-                        .toString()
-                        .replace("-", "")
-                        .substring(0, 16)
-                        .toUpperCase();
+        return "SR-" + UUID.randomUUID()
+                .toString()
+                .replace("-", "")
+                .substring(0, 16)
+                .toUpperCase();
     }
 }

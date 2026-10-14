@@ -2,31 +2,48 @@ package com.preethi.banking.dto;
 
 import jakarta.validation.constraints.Email;
 import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
 
 public class RegisterRequest {
 
-    @NotBlank(message = "Username is required")
-    @Size(min = 4, max = 30, message = "Username must be between 4 and 30 characters")
-    private String username;
+    @NotBlank
+    @Size(min = 2, max = 50)
+    private String firstName;
 
-    @NotBlank(message = "Email is required")
-    @Email(message = "Enter a valid email address")
+    @NotBlank
+    @Size(min = 2, max = 50)
+    private String lastName;
+
+    @NotBlank
+    @Email
     private String email;
 
-    @NotBlank(message = "Password is required")
-    @Size(min = 8, max = 100, message = "Password must be between 8 and 100 characters")
+    @NotBlank
+    @Pattern(regexp = "^[6-9][0-9]{9}$",
+            message = "Enter a valid 10-digit Indian mobile number")
+    private String phone;
+
+    @NotBlank
+    private String username;
+
+    @NotBlank
     private String password;
 
-    public RegisterRequest() {
+    public String getFirstName() {
+        return firstName;
     }
 
-    public String getUsername() {
-        return username;
+    public void setFirstName(String firstName) {
+        this.firstName = firstName;
     }
 
-    public void setUsername(String username) {
-        this.username = username;
+    public String getLastName() {
+        return lastName;
+    }
+
+    public void setLastName(String lastName) {
+        this.lastName = lastName;
     }
 
     public String getEmail() {
@@ -35,6 +52,22 @@ public class RegisterRequest {
 
     public void setEmail(String email) {
         this.email = email;
+    }
+
+    public String getPhone() {
+        return phone;
+    }
+
+    public void setPhone(String phone) {
+        this.phone = phone;
+    }
+
+    public String getUsername() {
+        return username;
+    }
+
+    public void setUsername(String username) {
+        this.username = username;
     }
 
     public String getPassword() {
