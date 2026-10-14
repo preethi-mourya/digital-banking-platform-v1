@@ -1,5 +1,7 @@
+
 package com.preethi.banking.entity;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import jakarta.persistence.*;
 
 @Entity
@@ -25,6 +27,11 @@ public class User {
 
     @Column(nullable = false)
     private boolean enabled = true;
+
+    @OneToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "customer_id", unique = true, nullable = true)
+    @JsonIgnore
+    private Customer customer;
 
     public User() {
     }
@@ -71,5 +78,13 @@ public class User {
 
     public void setEnabled(boolean enabled) {
         this.enabled = enabled;
+    }
+
+    public Customer getCustomer() {
+        return customer;
+    }
+
+    public void setCustomer(Customer customer) {
+        this.customer = customer;
     }
 }
